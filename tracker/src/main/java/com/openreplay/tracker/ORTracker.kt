@@ -132,6 +132,7 @@ object OpenReplay {
                             quality = options.screenshotQuality
                         )
                     )
+                    ScreenshotManager.start(appContext!!, sessionStartTs)
                 }
                 if (analytics) Analytics.start()
             }

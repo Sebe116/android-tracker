@@ -76,8 +76,8 @@ object ScreenshotManager {
         screenShotJob = scope.launch {
             while (true) {
                 delay(intervalMillis)
-                launch { makeScreenshotAndSave() }
-                launch { sendScreenshots() }
+                launch { makeScreenshotAndSaveWithArchive() }
+                launch { sendScreenshotArchives() }
             }
         }
     }
@@ -102,11 +102,12 @@ object ScreenshotManager {
         sanitizedElements.remove(view)
     }
 
-    private suspend fun sendScreenshots() {
+    private suspend fun sendScreenshotArchives() {
         // while we are doing  our job we  send data
         coroutineScope {
             try {
                 val archives = getArchiveFolder().listFiles().orEmpty()
+                if (archives.isEmpty()) return@coroutineScope
                 DebugUtils.log("send archives size:${archives.size}")
                 archives.forEach { archive ->
                     NetworkManager.sendImages(
@@ -126,20 +127,24 @@ object ScreenshotManager {
         }
     }
 
-    private suspend fun makeScreenshotAndSave() {
+    private suspend fun makeScreenshotAndSaveWithArchive(chunk: Int = 10) {
         // compress add screen shot to storage and archive
         // create picture
         coroutineScope {
             try {
                 DebugUtils.log("make screenshot")
-                val screenShotBitmap = withContext(Dispatchers.Main) {
-                    captureScreenshot()
-                }
+                val screenShotBitmap = withContext(Dispatchers.Main) { captureScreenshot() }
+                // get or create folder
+                val screenShotFolder = getScreenshotFolder()
+                val screenShotFile = File(screenShotFolder, "${System.currentTimeMillis()}.jpeg")
                 DebugUtils.log("save screenshot")
-                addToScreenShotsAndArchive(
-                    byteScreenShot = compress(screenShotBitmap),
-                    chunkSize = 10
-                )
+                // save screen shot
+                FileOutputStream(screenShotFile).use { out -> out.write(compress(screenShotBitmap)) }
+                // make archive for $chunk pictures
+                //  for example archivate folder for 10 pictures minimum
+                if (screenShotFolder.listFiles().orEmpty().size >= chunk) {
+                    archivateFolder(folder = screenShotFolder)
+                }
             } catch (e: Exception) {
                 DebugUtils.error(e)
             }
@@ -154,7 +159,14 @@ object ScreenshotManager {
             .use { dispatcher ->
                 scope.launch(dispatcher) {
                     try {
-                        sendScreenshots()
+                        DebugUtils.log("terminate")
+                        // get or create folder
+                        val screenShotFolder = getScreenshotFolder()
+                        // archive whole folder
+                        archivateFolder(folder = screenShotFolder)
+                        // send screen shots
+                        sendScreenshotArchives()
+                        DebugUtils.log("terminate done")
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
@@ -162,44 +174,37 @@ object ScreenshotManager {
             }
     }
 
-    private fun addToScreenShotsAndArchive(byteScreenShot: ByteArray, chunkSize: Int) {
-        // crate subfolder
-        val screenShotFolder = getScreenshotFolder()
-        // create file
-        val screenShotFile = File(screenShotFolder, "${System.currentTimeMillis()}.jpeg")
-        FileOutputStream(screenShotFile).use { out -> out.write(byteScreenShot) }
 
+    private fun archivateFolder(folder: File) {
         // now we have to add it to archive
         // prepare data
-        val screenshots = screenShotFolder.listFiles().orEmpty()
+        val screenshots = folder.listFiles().orEmpty()
         screenshots.sortBy { it.lastModified() }
 
         // combine chunked data to zip
-        if (screenshots.size > chunkSize) {
-            val combinedData = ByteArrayOutputStream()
-            GzipCompressorOutputStream(combinedData).use { gzos ->
-                TarArchiveOutputStream(gzos).use { tarOs ->
-                    screenshots.forEach { jpeg ->
-                        lastTs = jpeg.nameWithoutExtension
-                        val filename = "${firstTs}_1_${jpeg.nameWithoutExtension}.jpeg"
-                        val readBytes = jpeg.readBytes()
-                        val tarEntry = TarArchiveEntry(filename)
-                        tarEntry.size = readBytes.size.toLong()
-                        tarOs.putArchiveEntry(tarEntry)
-                        ByteArrayInputStream(readBytes).copyTo(tarOs)
-                        tarOs.closeArchiveEntry()
-                    }
+        val combinedData = ByteArrayOutputStream()
+        GzipCompressorOutputStream(combinedData).use { gzos ->
+            TarArchiveOutputStream(gzos).use { tarOs ->
+                screenshots.forEach { jpeg ->
+                    lastTs = jpeg.nameWithoutExtension
+                    val filename = "${firstTs}_1_${jpeg.nameWithoutExtension}.jpeg"
+                    val readBytes = jpeg.readBytes()
+                    val tarEntry = TarArchiveEntry(filename)
+                    tarEntry.size = readBytes.size.toLong()
+                    tarOs.putArchiveEntry(tarEntry)
+                    ByteArrayInputStream(readBytes).copyTo(tarOs)
+                    tarOs.closeArchiveEntry()
                 }
             }
-            // get archive
-            val archiveFolder = getArchiveFolder()
-            // create file
-            val achiveFile = File(archiveFolder, "$sessionId-$lastTs.tar.gz")
-            FileOutputStream(achiveFile).use { out -> out.write(combinedData.toByteArray()) }
-
-            // when done achive delete all screenshots
-            screenshots.forEach { it.delete() }
         }
+        // get archive
+        val archiveFolder = getArchiveFolder()
+        // create file
+        val achiveFile = File(archiveFolder, "$sessionId-$lastTs.tar.gz")
+        FileOutputStream(achiveFile).use { out -> out.write(combinedData.toByteArray()) }
+
+        // when done achive delete all screenshots
+        screenshots.forEach { it.delete() }
     }
 
     private fun getArchiveFolder(): File {
